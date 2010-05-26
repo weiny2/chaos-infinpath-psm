@@ -1,7 +1,7 @@
 Summary: QLogic PSM Libraries
 Name: infinipath-psm
 Version: @VERSION@
-Release: 2chaos{?dist}
+Release: 2chaos%{?dist}
 License: GPL
 Group: System Environment/Libraries
 URL: http://www.qlogic.com/
