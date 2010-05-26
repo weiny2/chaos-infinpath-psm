@@ -56,6 +56,7 @@ rm -rf $RPM_BUILD_ROOT
 %defattr(-,root,root,-)
 /usr/lib64/libpsm_infinipath.so.*
 /usr/lib64/libinfinipath.so.*
+/etc/udev/rules.d/60-ipath.rules
 
 %files devel
 %defattr(-,root,root,-)
