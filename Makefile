@@ -136,6 +136,7 @@ install: all
 		ln -sf ${TARGLIB}.so.${MAJOR} ${TARGLIB}.so)
 	install -D psm.h ${DESTDIR}/usr/include/psm.h
 	install -D psm_mq.h ${DESTDIR}/usr/include/psm_mq.h
+	install -D 60-ipath.rules ${DESTDIR}/etc/udev/rules.d/60-ipath.rules
 
 specfile:
 	sed -e 's/@VERSION@/'${MAJOR}.${MINOR}'/g' infinipath-psm.spec.in > \
