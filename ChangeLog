@@ -1,5 +1,6 @@
 2010-07-28 Ira Weiny <weiny2@llnl.gov>
 
+	* tag 1.13.0-3chaos
 	* Merge in changes from QLogic
 	  - Create the COMMIT file when generating the tarball. This file
 	    contains the Git commit id of the HEAD of the tree at time of
