@@ -1,3 +1,15 @@
+2010-07-28 Ira Weiny <weiny2@llnl.gov>
+
+	* Merge in changes from QLogic
+	  - Create the COMMIT file when generating the tarball. This file
+	    contains the Git commit id of the HEAD of the tree at time of
+	    tarball generation.
+	  - Added PSM user level support to specify HCA/Port selection algorithm via 
+	    environment variable
+	  - Merge branch 'master' of /home/git/repos/InfiniPath-PSM
+	  - Add a guard against building for unsupported architectures.
+	  - Provide ability to disable receive header checks on packet reception.
+
 2010-05-26 Ira Weiny <weiny2@llnl.gov>
 
 	* Start LLNL ChangeLog
