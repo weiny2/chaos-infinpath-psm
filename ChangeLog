@@ -1,3 +1,12 @@
+2010-08-17 Ira Weiny <weiny2@llnl.gov>
+
+	* tag 1.13.0-4chaos
+	* Pull in QLogic changes
+	  - Add Makefile target "ofeddist" to be used when generating the
+	    tarball for OFED.
+	  - Fixed context 15 check on QLE72XX on receive packet processing.
+	  - Make the connect warning interval configurable
+
 2010-07-28 Ira Weiny <weiny2@llnl.gov>
 
 	* tag 1.13.0-3chaos
