@@ -22,6 +22,15 @@ Requires(postun): /sbin/ldconfig
 @REQUIRES-DEVEL@
 Conflicts: infinipath-devel
 
+%package static
+Summary: Static versions of the libpsm_infinipath library
+Group: System Environment/Development
+Requires: %{name} = %{version}-%{release}
+Requires(post): /sbin/ldconfig
+Requires(postun): /sbin/ldconfig
+@REQUIRES-DEVEL@
+Conflicts: infinipath-static
+
 %description
 The PSM Messaging API, or PSM API, is QLogic's low-level
 user-level communications interface for the Truescale
@@ -31,6 +40,9 @@ interfaces in parallel environments.
 
 %description devel
 Development files for the libpsm_infinipath library
+
+%description static
+Static versions of the libpsm_infinipath library
 
 %prep
 %setup -q
@@ -64,6 +76,10 @@ rm -rf $RPM_BUILD_ROOT
 /usr/lib64/libinfinipath.so
 /usr/include/psm.h
 /usr/include/psm_mq.h
+
+%files static
+/usr/lib64/libpsm_infinipath.a
+/usr/lib64/libinfinipath.a
 
 
 %changelog
