@@ -49,7 +49,7 @@ ${TARGLIB}-objs := ipath_debug.o ipath_time.o ipath_proto.o \
 	ipath_dwordcpy-$(arch).o ipath_i2cflash.o ipath_sysfs.o ipath_syslog.o \
 	ipath_write_pio-$(arch).o $(PLATFORM_OBJ)
 
-all .DEFAULT: ${TARGLIB}.so
+all .DEFAULT: ${TARGLIB}.so ${TARGLIB}.a
 
 install: all
 	install -D ${TARGLIB}.so.${MAJOR}.${MINOR} \
@@ -57,6 +57,7 @@ install: all
 	(cd ${DESTDIR}${INSTALL_LIB_TARG} ; \
 		ln -sf ${TARGLIB}.so.${MAJOR}.${MINOR} ${TARGLIB}.so.${MAJOR} ; \
 		ln -sf ${TARGLIB}.so.${MAJOR} ${TARGLIB}.so)
+	install -D ${TARGLIB}.a ${DESTDIR}${INSTALL_LIB_TARG}/${TARGLIB}.a
 
 ${TARGLIB}.so: ${TARGLIB}.so.${MAJOR}
 	ln -fs ${TARGLIB}.so.${MAJOR}.${MINOR} $@
@@ -74,6 +75,9 @@ ${TARGLIB}.so.${MAJOR}.${MINOR}: ${${TARGLIB}-objs}
 	$(CC) -o $@ -Wl,-soname=${TARGLIB}.so.${MAJOR} -shared \
 		-Wl,--unique='*fastpath*' \
 		${${TARGLIB}-objs} _revision.o $(LDFLAGS)
+
+${TARGLIB}.a: ${TARGLIB}.so.${MAJOR}.${MINOR}
+	$(AR) r ${TARGLIB}.a ${${TARGLIB}-objs} _revision.o
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@

@@ -99,6 +99,7 @@ all: symlinks
 		$(MAKE) -C $$subdir $@ ;\
 	done
 	$(MAKE) ${TARGLIB}.so
+	$(MAKE) ${TARGLIB}.a
 
 clean:
 	rm -f _revision.c
@@ -134,6 +135,7 @@ install: all
 	(cd ${DESTDIR}${INSTALL_LIB_TARG} ; \
 		ln -sf ${TARGLIB}.so.${MAJOR}.${MINOR} ${TARGLIB}.so.${MAJOR} ; \
 		ln -sf ${TARGLIB}.so.${MAJOR} ${TARGLIB}.so)
+	install -D ${TARGLIB}.a ${DESTDIR}${INSTALL_LIB_TARG}/${TARGLIB}.a
 	install -D psm.h ${DESTDIR}/usr/include/psm.h
 	install -D psm_mq.h ${DESTDIR}/usr/include/psm_mq.h
 	install -D 60-ipath.rules ${DESTDIR}/etc/udev/rules.d/60-ipath.rules
@@ -239,6 +241,9 @@ ${TARGLIB}.so.${MAJOR}.${MINOR}: ${${TARGLIB}-objs}
 	@leaks=`nm $@ | grep ' [DT] ' | \
 	 grep -v -e ' [DT] \(_fini\|_init\|infinipath_\|ips_\|psmi\|__psmi\?_\|_\rest.pr\|_save.pr\|kcopy\)'`; \
 	 if test -n "$$leaks"; then echo "Build failed, leaking symbols:"; echo "$$leaks"; exit 1; fi
+
+${TARGLIB}.a: ${TARGLIB}.so.${MAJOR}.${MINOR}
+	$(AR) r ${TARGLIB}.a ${${TARGLIB}-objs} _revision.o
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
