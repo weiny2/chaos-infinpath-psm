@@ -80,7 +80,12 @@
     PSMI_EPID_UNPACK_EXT(epid,lid,context,subcontext,hca_type,sl);	\
   } while (0)
 
-#define PSMI_MIN_EP_CLOSE_TIMEOUT   2*SEC_ULL
+#define PSMI_MIN_EP_CONNECT_TIMEOUT (2 * SEC_ULL)
+#define PSMI_MIN_EP_CLOSE_TIMEOUT   (2 * SEC_ULL)
+#define PSMI_MAX_EP_CLOSE_TIMEOUT   (60 * SEC_ULL)
+
+#define PSMI_MIN_EP_CLOSE_GRACE_INTERVAL (1 * SEC_ULL)
+#define PSMI_MAX_EP_CLOSE_GRACE_INTERVAL (10 * SEC_ULL)
 
 struct psm_ep {
     psm_epid_t		epid;	    /**> This endpoint's Endpoint ID */
@@ -100,7 +105,10 @@ struct psm_ep {
     int			memmode;    /**> min, normal, large memory mode */
 
     uint32_t	ipath_num_sendbufs; /**> Number of allocated send buffers */
+    uint32_t    ipath_num_descriptors; /** Number of allocated scb descriptors*/
+    uint32_t    ipath_imm_size;     /** Immediate data size */
     uint32_t	shm_mbytes;	    /**> Number of shared memory pages */
+    uint32_t	connections;	    /**> Number of connections */	
 
     psmi_context_t	context;
     char	*context_mylabel;
@@ -108,6 +116,9 @@ struct psm_ep {
 
     /* Active Message handler table */
     void    **am_htable;
+
+    uint64_t    gid_hi;
+    uint64_t    gid_lo;
 
     ptl_ctl_t	ptl_amsh;
     ptl_ctl_t	ptl_ips;

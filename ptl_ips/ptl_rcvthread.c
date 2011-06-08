@@ -39,7 +39,7 @@
 #include "ips_recvhdrq.h"
 
 /* All in milliseconds */
-#define RCVTHREAD_TO_MIN_FREQ	    1	   /* min of 1 poll per sec */
+#define RCVTHREAD_TO_MIN_FREQ	    10	   /* min of 10 polls per sec */
 #define RCVTHREAD_TO_MAX_FREQ	    100    /* max of 100 polls per sec */
 #define RCVTHREAD_TO_SHIFT	    1
 
@@ -201,7 +201,7 @@ rcvthread_initsched(struct ptl_rcvthread *rcvc)
 	else {
     	if (nparsed > 0 && tvals[0] > 1000) 
     	    invalid = 1;
-    	if (nparsed > 1 && (tvals[1] > 1000 || tvals[1] > tvals[0]))
+    	if (nparsed > 1 && (tvals[1] > 1000 || tvals[1] < tvals[0]))
     	    invalid = 1;
     	if (nparsed > 2 && tvals[2] > 10)
     	    invalid = 1;

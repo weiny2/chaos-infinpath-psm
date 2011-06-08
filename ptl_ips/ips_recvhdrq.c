@@ -123,7 +123,7 @@ ips_recvhdrq_init(const psmi_context_t *context,
 
     recvq->recvq_callbacks = *callbacks; /* deep copy */
     SLIST_INIT(&recvq->pending_acks); 
-    
+
     recvq->state->hdrq_head = 0;
     recvq->state->rcv_egr_index_head = NO_EAGER_UPDATE;
     recvq->state->num_hdrq_done = 0;
@@ -289,7 +289,6 @@ _check_headers(struct ips_recvhdrq_event *rcv_ev)
 
   /* Verify that the packet was destined for our context */
   dest_context = ips_proto_dest_context_from_header(proto, rcv_ev->p_hdr);
-  
   if_pf (dest_context != recvq->proto->epinfo.ep_context) {
     
     struct ips_recvhdrq_state *state = recvq->state;
@@ -389,18 +388,30 @@ PSMI_ALWAYS_INLINE(
 void
 process_pending_acks(struct ips_recvhdrq *recvq))
 {
+  psm_error_t err;
+  
   /* If any pending acks, dispatch them now */
   while (!SLIST_EMPTY(&recvq->pending_acks)) {
     struct ips_flow *flow = SLIST_FIRST(&recvq->pending_acks);
     
     SLIST_REMOVE_HEAD(&recvq->pending_acks, next);
     SLIST_NEXT(flow, next) = NULL;
-    flow->flags &= ~IPS_FLOW_FLAG_PENDING_ACK;
+
+    if (flow->flags & IPS_FLOW_FLAG_PENDING_ACK) {
+      psmi_assert_always((flow->flags & IPS_FLOW_FLAG_PENDING_NAK) == 0);
+      
+      flow->flags &= ~IPS_FLOW_FLAG_PENDING_ACK;
+      err = ips_proto_send_ctrl_message(flow, OPCODE_ACK, 
+					&flow->ipsaddr->ctrl_msg_queued, NULL);
+    }
+    else {
+      psmi_assert_always(flow->flags & IPS_FLOW_FLAG_PENDING_NAK);
+      
+      flow->flags &= ~IPS_FLOW_FLAG_PENDING_NAK;
+      err = ips_proto_send_ctrl_message(flow, OPCODE_NAK, 
+					&flow->ipsaddr->ctrl_msg_queued, NULL);
+    }
     
-    /* If NAK hasn't been sent send an ACK */
-    if (!(flow->flags & IPS_FLOW_FLAG_NAK_SEND))
-      ips_proto_send_ctrl_message(flow, OPCODE_ACK, 
-				  &flow->ipsaddr->ctrl_msg_queued, NULL);
   }
   
 }
@@ -461,6 +472,7 @@ ips_recvhdrq_progress(struct ips_recvhdrq *recvq)
 					    : ips_recvq_tail_get(&recvq->hdrq);
     const uint32_t *rcv_hdr = 
 	    (const uint32_t *) recvq->hdrq.base_addr + state->hdrq_head;
+    uint32_t tmp_hdrq_head;
     
     done = !next_hdrq_is_ready();
 
@@ -524,10 +536,10 @@ ips_recvhdrq_progress(struct ips_recvhdrq *recvq)
 	  if ((rcv_ev.error_flags & INFINIPATH_RHF_H_TIDERR) || 
 	      (rcv_ev.error_flags & INFINIPATH_RHF_H_TFSEQERR) ||
 	      (rcv_ev.error_flags & INFINIPATH_RHF_H_TFGENERR)) {
-		/* Subports need to see expected tid errors */
+		/* Subcontexts need to see expected tid errors */
 		if (rcv_ev.ptype == RCVHQ_RCV_TYPE_EXPECTED &&
 		    dest_subcontext != recvq->subcontext)
-			goto subport_packet;
+			goto subcontext_packet;
 
 		recvq->recvq_callbacks.callback_error(&rcv_ev);
 
@@ -561,7 +573,7 @@ ips_recvhdrq_progress(struct ips_recvhdrq *recvq)
 	    }
 	}
 	else {
-subport_packet:
+subcontext_packet:
 	    /* If the destination is not our subcontext, process message
 	     * as a subcontext message (shared contexts) */
 	    rcv_ev.ipsaddr = NULL;
@@ -583,8 +595,13 @@ skip_packet:
 	    state->rcv_egr_index_head = ipath_hdrget_index(rhf);
 
 skip_packet_no_egr_update:
-	state->hdrq_head += hdrq_elemsz;
-	if_pf (state->hdrq_head > recvq->hdrq_elemlast)
+        /* Note that state->hdrq_head is sampled speculatively by the code
+         * in ips_ptl_shared_poll() when context sharing, so it is not safe
+         * for this shared variable to temporarily exceed the last element. */
+        tmp_hdrq_head = state->hdrq_head + hdrq_elemsz;
+	if_pt (tmp_hdrq_head <= recvq->hdrq_elemlast)
+          state->hdrq_head = tmp_hdrq_head;
+        else
 	  state->hdrq_head = 0;
 	
 	if_pf (has_no_rtail && ++recvq->state->hdrq_rhf_seq > LAST_RHF_SEQNO)

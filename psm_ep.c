@@ -92,7 +92,8 @@ __psm_ep_num_devunits(uint32_t *num_units_o)
 PSMI_API_DECL(psm_ep_num_devunits)
 
 static psm_error_t
-psmi_ep_devlids(uint16_t **lids, uint32_t *num_lids_o)
+psmi_ep_devlids(uint16_t **lids, uint32_t *num_lids_o,
+		uint64_t my_gid_hi, uint64_t my_gid_lo)
 {
     static uint16_t *ipath_lids = NULL;
     static uint32_t nlids;
@@ -118,6 +119,8 @@ psmi_ep_devlids(uint16_t **lids, uint32_t *num_lids_o)
 	    int j;
 	    for (j = 1; j <= IPATH_MAX_PORT; j++) {
 		    int lid = ipath_get_port_lid(i, j);
+		    int ret;
+		    uint64_t gid_hi = 0, gid_lo = 0;
 		    /* OK if trying to get LID fails for port > 1 */
 		    if (lid == -1 && j == 1) {
 			err = psmi_handle_error(NULL, PSM_EP_DEVICE_FAILURE,
@@ -126,6 +129,34 @@ psmi_ep_devlids(uint16_t **lids, uint32_t *num_lids_o)
 		    }
 		    else if (lid == -1) /* port not present */
 			    continue;
+		    ret = ipath_get_port_gid(i, j, &gid_hi, &gid_lo);
+		    /* OK if trying to get LID fails for port > 1 */
+		    if (ret == -1 && j == 1) {
+			err = psmi_handle_error(NULL, PSM_EP_DEVICE_FAILURE,
+				    "Couldn't get gid for unit %d:%d", i, j);
+			goto fail;
+		    }
+		    else if (ret == -1) /* port not present */
+			continue;
+		    else if (my_gid_hi != gid_hi) {
+		        _IPATH_VDBG("LID %d, unit %d, port %d, "
+                                    "mismatched GID %llx:%llx and "
+				    "%llx:%llx\n",
+				    lid, i, j,
+				    (unsigned long long) gid_hi,
+				    (unsigned long long) gid_lo,
+				    (unsigned long long) my_gid_hi,
+				    (unsigned long long) my_gid_lo);
+		        continue;
+		    }
+		    _IPATH_VDBG("LID %d, unit %d, port %d, "
+                                "matching GID %llx:%llx and "
+				"%llx:%llx\n", lid, i, j,
+				(unsigned long long) gid_hi,
+				(unsigned long long) gid_lo,
+				(unsigned long long) my_gid_hi,
+				(unsigned long long) my_gid_lo);
+
 		    ipath_lids[nlids++] = (uint16_t) lid;
 	    }
 	}
@@ -277,7 +308,7 @@ __psm_ep_epid_share_memory(psm_ep_t ep, psm_epid_t epid, int *result_o)
 	    result = 1;
     }
     else {
-	err = psmi_ep_devlids(&lids, &num_lids);
+        err = psmi_ep_devlids(&lids, &num_lids, ep->gid_hi, ep->gid_lo);
 	if (err)
 	    return err;
 	for (i = 0; i < num_lids; i++) {
@@ -300,17 +331,23 @@ __psm_ep_open_opts_get_defaults(struct psm_ep_open_opts *opts)
 {
     union psmi_envvar_val nSendBuf;
     union psmi_envvar_val netPKey;
+#if (PSM_VERNO >= 0x010d)
     union psmi_envvar_val env_path_service_id;
     union psmi_envvar_val env_path_res_type;
+#endif
+#if (PSM_VERNO >= 0x010e)
+    union psmi_envvar_val nSendDesc;
+    union psmi_envvar_val immSize;
+#endif
 
     PSMI_ERR_UNLESS_INITIALIZED(NULL);
     
     /* Get number of default send buffers from environment */
     psmi_getenv("PSM_NUM_SEND_BUFFERS",
-		"Number of send buffers to allocate [512]",
+		"Number of send buffers to allocate [1024]",
 		PSMI_ENVVAR_LEVEL_USER,
 		PSMI_ENVVAR_TYPE_UINT,
-		(union psmi_envvar_val) 512,
+		(union psmi_envvar_val) 1024,
 		&nSendBuf);
     
     /* Get network key from environment. MVAPICH and other vendor MPIs do not
@@ -322,7 +359,8 @@ __psm_ep_open_opts_get_defaults(struct psm_ep_open_opts *opts)
 		PSMI_ENVVAR_TYPE_ULONG,
 		(union psmi_envvar_val) IPATH_DEFAULT_P_KEY,
 		&netPKey);
-    
+
+#if (PSM_VERNO >= 0x010d)    
     /* Get Service ID from environment */
     psmi_getenv("PSM_IB_SERVICE_ID",
 		"IB Service ID for path resolution",
@@ -342,6 +380,29 @@ __psm_ep_open_opts_get_defaults(struct psm_ep_open_opts *opts)
                 "Mechanism to query IB path record (default is no path query)",
                 PSMI_ENVVAR_LEVEL_USER, PSMI_ENVVAR_TYPE_STR,
                 (union psmi_envvar_val) "none", &env_path_res_type);
+#endif
+
+#if (PSM_VERNO >= 0x010e)
+    /* Get numner of send descriptors - by default this is 4 times the number
+     * of send buffers - mainly used for short/inlined messages.
+     */
+    psmi_getenv("PSM_NUM_SEND_DESCRIPTORS",
+		"Number of send descriptors to allocate [4096]",
+		PSMI_ENVVAR_LEVEL_USER,
+		PSMI_ENVVAR_TYPE_UINT,
+		(union psmi_envvar_val) (nSendBuf.e_uint << 2),
+		&nSendDesc);
+
+    /* Get immediate data size - transfers less than immediate data size do
+     * not consume a send buffer and require just a send descriptor.
+     */
+    psmi_getenv("PSM_SEND_IMMEDIATE_SIZE",
+		"Immediate data send size not requiring a buffer [128]",
+		PSMI_ENVVAR_LEVEL_USER,
+		PSMI_ENVVAR_TYPE_UINT,
+		(union psmi_envvar_val) 128,
+		&immSize);
+#endif
     
     opts->timeout = 30000000000LL; /* 30 sec */
     opts->unit    = PSMI_UNIT_ID_ANY;
@@ -354,6 +415,7 @@ __psm_ep_open_opts_get_defaults(struct psm_ep_open_opts *opts)
     opts->shm_mbytes = 10;
     opts->sendbufs_num = nSendBuf.e_uint;
     opts->network_pkey = (uint64_t) netPKey.e_ulong;
+#if (PSM_VERNO >= 0x010d)
     opts->service_id = (uint64_t) env_path_service_id.e_ulonglong;
     
     if (!strcasecmp(env_path_res_type.e_str, "none"))
@@ -366,6 +428,12 @@ __psm_ep_open_opts_get_defaults(struct psm_ep_open_opts *opts)
       _IPATH_ERROR("Unknown path resolution type %s. Disabling use of path record query.\n", env_path_res_type.e_str);
       opts->path_res_type = PSM_PATH_RES_NONE;
     }
+#endif
+#if (PSM_VERNO >= 0x010e)
+    opts->senddesc_num = nSendDesc.e_uint;
+    opts->imm_size     = immSize.e_uint;
+#endif
+
     return PSM_OK;
 }
 PSMI_API_DECL(psm_ep_open_opts_get_defaults)
@@ -433,13 +501,26 @@ __psm_ep_open(psm_uuid_t const unique_job_key, struct psm_ep_open_opts const *op
 	    opts.outvl = opts_i->outvl;
 #endif
 	}
+#if (PSM_VERNO >= 0x010d)
 	/* Note: Environment variable specification for service ID and 
 	 * path resolition type takes precedence over ep_open defaults.
 	 */
-	if (opts_i->service_id)
-	  opts.service_id = (uint64_t) opts_i->service_id;
-	if (opts.path_res_type == PSM_PATH_RES_NONE)
-	  opts.path_res_type = opts_i->path_res_type;
+	if (psmi_verno_client() >= 0x010d) {
+	  if (opts_i->service_id)
+	    opts.service_id = (uint64_t) opts_i->service_id;
+	  if (opts.path_res_type == PSM_PATH_RES_NONE)
+	    opts.path_res_type = opts_i->path_res_type;
+	}
+#endif
+
+#if (PSM_VERNO >= 0x010e)
+	if (psmi_verno_client() >= 0x010e) {
+	  if (opts_i->senddesc_num)
+	    opts.senddesc_num = opts_i->senddesc_num;
+	  if (opts_i->imm_size) 
+	    opts.imm_size = opts_i->imm_size;
+	}
+#endif
     }
 
     if ((err = psm_ep_num_devunits(&num_units)) != PSM_OK) 
@@ -585,11 +666,26 @@ __psm_ep_open(psm_uuid_t const unique_job_key, struct psm_ep_open_opts const *op
     ep->memmode = psmi_parse_memmode();
     ep->ipath_num_sendbufs = opts.sendbufs_num;
     ep->network_pkey = (uint16_t) opts.network_pkey & PSMI_EP_OPEN_PKEY_MASK;
+#if (PSM_VERNO >= 0x010d)
     ep->service_id = opts.service_id;
     ep->path_res_type = opts.path_res_type;
+#else
+    /* Select sane defaults with older PSM header */
+    ep->service_id = 0x1000117500000000ULL; /* Default service ID */
+    ep->path_res_type = 0;  /* No path resolution */
+#endif
+#if (PSM_VERNO >= 0x010e)
+    ep->ipath_num_descriptors = opts.senddesc_num;
+    ep->ipath_imm_size = opts.imm_size;
+#else
+    /* Default is 4 times more descriptors than buffers */
+    ep->ipath_num_descriptors = ep->ipath_num_sendbufs << 2;
+    ep->ipath_imm_size = 128;
+#endif
     ep->errh = psmi_errhandler_global; /* by default use the global one */
     ep->ptl_amsh.ep_poll = psmi_poll_noop;
     ep->ptl_ips.ep_poll  = psmi_poll_noop;
+    ep->connections = 0;
 
     /* See how many iterations we want to spin before yielding */
     psmi_getenv("PSM_YIELD_SPIN_COUNT",
@@ -716,20 +812,49 @@ __psm_ep_close(psm_ep_t ep, int mode, int64_t timeout_in)
 {
     psm_error_t err = PSM_OK;
     uint64_t t_start = get_cycles();
+    union psmi_envvar_val timeout_intval;
 
     PSMI_ERR_UNLESS_INITIALIZED(ep);
 
     PSMI_PLOCK();
 
+    if (psmi_opened_endpoint == NULL) {
+        err =  psmi_handle_error(NULL, PSM_EP_WAS_CLOSED,
+			         "PSM Endpoint is closed or does not exist");
+        return err;
+    }
+
     psmi_opened_endpoint = NULL;
 
-    /* The minimum should probably be chosen to be a function of the number of
-     * connected peers */
-    if (timeout_in < PSMI_MIN_EP_CLOSE_TIMEOUT)
+    psmi_getenv("PSM_CLOSE_TIMEOUT",
+                "End-point close timeout over-ride.",
+                PSMI_ENVVAR_LEVEL_USER, PSMI_ENVVAR_TYPE_UINT,
+                (union psmi_envvar_val) 0,
+                &timeout_intval);
+
+    if (getenv("PSM_CLOSE_TIMEOUT")) {
+        timeout_in = timeout_intval.e_uint * SEC_ULL;
+    }
+    else if (timeout_in > 0) {
+        /* The timeout parameter provides the minimum timeout. A heuristic
+	 * is used to scale up the timeout linearly with the number of 
+	 * endpoints, and we allow one second per 100 endpoints. */
+        timeout_in = max(timeout_in, (ep->connections * SEC_ULL) / 100);
+    }
+
+    if (timeout_in > 0 && timeout_in < PSMI_MIN_EP_CLOSE_TIMEOUT)
 	timeout_in = PSMI_MIN_EP_CLOSE_TIMEOUT;
-    _IPATH_PRDBG("Closing endpoint %p with force=%s and to=%.2f seconds\n",
-		    ep, mode == PSM_EP_CLOSE_FORCE ? "YES" : "NO", 
-		    (double) timeout_in / 1e9);
+
+    /* Infinite and excessive close time-out are limited here to a max.
+     * The "rationale" is that there is no point waiting around forever for
+     * graceful termination. Normal (or forced) process termination should clean 
+     * up the context state correctly even if termination is not graceful. */
+    if (timeout_in <= 0 || timeout_in < PSMI_MAX_EP_CLOSE_TIMEOUT)
+	timeout_in = PSMI_MAX_EP_CLOSE_TIMEOUT;
+    _IPATH_PRDBG("Closing endpoint %p with force=%s and to=%.2f seconds and "
+                 "%d connections\n",
+		 ep, mode == PSM_EP_CLOSE_FORCE ? "YES" : "NO", 
+		 (double) timeout_in / 1e9, (int) ep->connections);
 
     /* XXX We currently cheat in the sense that we leave each PTL the allowed
      * timeout.  There's no good way to do this until we change the PTL

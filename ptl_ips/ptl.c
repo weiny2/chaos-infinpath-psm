@@ -52,7 +52,16 @@ int
 ips_subcontext_process(const struct ips_recvhdrq_event *rcv_ev, uint32_t subcontext)
 {
     struct ptl_shared *recvshc = rcv_ev->proto->ptl->recvshc;
-    return ips_writehdrq_append(&recvshc->writeq[subcontext], rcv_ev);
+    if_pt (subcontext != recvshc->subcontext &&
+           subcontext < recvshc->subcontext_cnt) {
+        return ips_writehdrq_append(&recvshc->writeq[subcontext], rcv_ev);
+    }
+    else {
+        _IPATH_VDBG("Drop pkt for subcontext %d out of %d (I am %d) : errors 0x%x\n",
+		    (int) subcontext, (int) recvshc->subcontext_cnt,
+		    (int) recvshc->subcontext, (unsigned) rcv_ev->error_flags);
+        return IPS_RECVHDRQ_BREAK;
+    }
 }
 
 static
@@ -193,6 +202,8 @@ ips_ptl_init(const psm_ep_t ep, ptl_t *ptl, ptl_ctl_t *ctl)
 {
     psm_error_t err = PSM_OK;
     uint32_t num_of_send_bufs = ep->ipath_num_sendbufs;
+    uint32_t num_of_send_desc = ep->ipath_num_descriptors;
+    uint32_t imm_size = ep->ipath_imm_size;
     const psmi_context_t *context = &ep->context;
     const struct ipath_user_info *user_info = &context->user_info;
     const int enable_shcontexts = (user_info->spu_subcontext_cnt > 0);
@@ -234,13 +245,7 @@ ips_ptl_init(const psm_ep_t ep, ptl_t *ptl, ptl_ctl_t *ctl)
      * In 'context', runtime flags reflect what the driver is capable of.
      * In 'ptl', runtime flags reflect the features we can or want to use in
      *           the driver's supported runtime flags.
-     *
-     * TODO: Look at supporting a receive thread in shared contexts
      */
-    if (enable_shcontexts) {
-	_IPATH_PRDBG("Disabling rcv thread in shared contexts\n");
-	ptl->runtime_flags &= ~PSMI_RUNTIME_RCVTHREAD;
-    }
 
     /*
      * This timer is to be used to check the context's status at every
@@ -286,9 +291,9 @@ ips_ptl_init(const psm_ep_t ep, ptl_t *ptl, ptl_ctl_t *ctl)
     /*
      * Actual ips protocol handling.
      */
-    if ((err = ips_proto_init(context, ptl, num_of_send_bufs, 
-			      &ptl->timerq, &ptl->epstate, &ptl->spioc, 
-			      &ptl->proto)))
+    if ((err = ips_proto_init(context, ptl, num_of_send_bufs, num_of_send_desc,
+			      imm_size, &ptl->timerq, &ptl->epstate, 
+			      &ptl->spioc, &ptl->proto)))
 	goto fail;
 
     /*
@@ -556,8 +561,7 @@ ips_ptl_shared_poll(ptl_t *ptl, int _ignored)
      * minimize lock contention due to processes spinning on the 
      * shared context. */
     if (ips_recvhdrq_isempty(&recvshc->recvq)) {
-        if ((recvshc->poll_counter & recvshc->poll_mask) == 0 && 
-            !ips_recvhdrq_isempty(&ptl->recvq) &&
+        if (!ips_recvhdrq_isempty(&ptl->recvq) &&
 	    ips_try_lock_shared_context(recvshc) == 0) {
 	    /* check that subcontext is empty while under lock to avoid 
              * re-ordering of incoming packets (since packets from 
@@ -567,31 +571,15 @@ ips_ptl_shared_poll(ptl_t *ptl, int _ignored)
 	    }
             ips_unlock_shared_context(recvshc);
 	}
-
-        if (err == PSM_OK_NO_PROGRESS) {
-            recvshc->poll_counter++;
-            if_pf (recvshc->poll_counter >= recvshc->poll_period) {
-	        recvshc->poll_counter = 0;
-	        recvshc->poll_period = MIN(recvshc->poll_period << 1,
-                                           PTL_SHARED_POLL_MAX_PERIOD);
-		recvshc->poll_mask = (recvshc->poll_period >> 
-                                      PTL_SHARED_POLL_SHIFT) - 1;
-	    }
-	}
-        else {
-            recvshc->poll_period = PTL_SHARED_POLL_MIN_PERIOD;
-            recvshc->poll_mask = (PTL_SHARED_POLL_MIN_PERIOD >>
-                                  PTL_SHARED_POLL_SHIFT) - 1;
-        }
     }
 
+    if_pf (err > PSM_OK_NO_PROGRESS)
+	return err;
+
     if (!ips_recvhdrq_isempty(&recvshc->recvq)) {
-	err = ips_recvhdrq_progress(&recvshc->recvq);
-        if (err != PSM_OK_NO_PROGRESS) {
-            recvshc->poll_counter = 0;
-            recvshc->poll_period = PTL_SHARED_POLL_MIN_PERIOD;
-            recvshc->poll_mask = (PTL_SHARED_POLL_MIN_PERIOD >>
-                                  PTL_SHARED_POLL_SHIFT) - 1;
+	err2 = ips_recvhdrq_progress(&recvshc->recvq);
+        if (err2 != PSM_OK_NO_PROGRESS) {
+	    err = err2;
         }
     }	
 
@@ -658,12 +646,8 @@ shrecvq_init(ptl_t *ptl, const psmi_context_t *context)
     psmi_assert_always(recvshc->subcontext_cnt <= INFINIPATH_MAX_SUBCONTEXT);
     psmi_assert_always(recvshc->subcontext < recvshc->subcontext_cnt);
 
-    recvshc->poll_counter = 0;
-    recvshc->poll_period = PTL_SHARED_POLL_MIN_PERIOD;
-    recvshc->poll_mask = (PTL_SHARED_POLL_MIN_PERIOD >> 
-                          PTL_SHARED_POLL_SHIFT) - 1;
-
-    if ((err = ips_subcontext_ureg_get(ptl, context, recvshc->subcontext_ureg)))
+    if ((err = ips_subcontext_ureg_get(ptl, context, recvshc->subcontext_ureg,
+                                       recvshc->subcontext_cnt)))
         goto fail;
     if ((err = ips_subcontext_ureg_initialize(
            ptl, recvshc->subcontext, recvshc->subcontext_ureg[recvshc->subcontext])))
@@ -722,6 +706,10 @@ shrecvq_fini(ptl_t *ptl)
 {
     psm_error_t err = PSM_OK;
     int i;
+
+    /* disable my write header queue before deallocation */
+    i = ptl->recvshc->subcontext;
+    ptl->recvshc->subcontext_ureg[i]->writeq_state.enabled = 0;
 
     if ((err = ips_recvhdrq_fini(&ptl->recvq)))
         goto fail;

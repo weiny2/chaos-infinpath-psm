@@ -113,7 +113,7 @@ struct ips_proto;
 psm_error_t
 ips_proto_init(const psmi_context_t *context, 
 	       const struct ptl *ptl, 
-	       int num_of_send_bufs, 
+	       int num_of_send_bufs, int num_of_send_desc, uint32_t imm_size,
 	       const struct psmi_timer_ctrl *timerq, /* PTL's timerq */
 	       const struct ips_epstate *epstate, /* PTL's epstate */
 	       const struct ips_spio *spioc, /* PTL's spio control */
@@ -274,9 +274,10 @@ struct ips_proto {
     uint32_t	iovec_cntr_last_completed;
     uint32_t	iovec_thresh_eager;
     uint32_t    iovec_thresh_eager_blocking;
-    uint32_t	scb_max_inflight;
     uint32_t	scb_max_sdma;
     uint32_t	scb_bufsize;
+    uint16_t	scb_max_inflight;
+    uint16_t    flow_credits;
     mpool_t	pend_sends_pool;
     struct ips_ibta_compliance_fn ibta;
     struct ips_proto_stats  stats;
@@ -300,6 +301,7 @@ struct ips_proto {
 
     int		    num_connected_to; 
     int		    num_connected_from;
+    int		    num_disconnect_requests;
 
     /* SL2VL table for protocol */
     int         sl2vl[16];
@@ -423,13 +425,16 @@ struct ips_flow {
     uint32_t frag_size;
     uint16_t flags;
     uint16_t sl;
-    uint16_t cca_ooo_pkts;			    
-    uint16_t lrh0_pad;
+    uint16_t cca_ooo_pkts;			   
+    uint16_t credits;           /* Current credits available to send on flow */
+    uint16_t cwin;              /* Size of congestion window */
+    uint16_t ack_interval;
 
     psmi_seqnum_t xmit_seq_num;
     psmi_seqnum_t xmit_ack_num;
     psmi_seqnum_t recv_seq_num;
-  
+    psmi_seqnum_t last_seq_num;
+
     uint32_t scb_num_pending;
     uint32_t scb_num_unacked;
 
@@ -463,6 +468,7 @@ struct ptl_epaddr {
     uint32_t ctrl_msg_queued; /* bitmap of queued control messages to be send */
     uint32_t delay_in_ms;   /* used in close */
     uint64_t s_timeout;	    /* used as a time in close */
+    int credit;
     
     pthread_mutex_t sesslock;
     struct ptl_epaddr_stats stats;
@@ -530,7 +536,7 @@ int ips_proto_process_unknown(const struct ips_recvhdrq_event *rcv_ev);
 /* Exposed for fastpath only */
 void ips_proto_process_ack(struct ips_recvhdrq_event *rcv_ev);
 /* Handling error cases */
-int ips_proto_process_packet_error(const struct ips_recvhdrq_event *rcv_ev);
+int ips_proto_process_packet_error(struct ips_recvhdrq_event *rcv_ev);
 
 /*
  * Protocol exception handling and frame dumps
@@ -562,6 +568,7 @@ psm_error_t ips_protoexp_init(const psmi_context_t *context,
 			      const struct ips_proto *proto,
 			      uint32_t protoexp_flags,
 			      int num_of_send_bufs,
+			      int num_of_send_desc,
 			      struct ips_protoexp **protoexp_o);
 
 psm_error_t ips_protoexp_fini(struct ips_protoexp *protoexp);

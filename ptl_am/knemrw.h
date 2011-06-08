@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2006-2010. QLogic Corporation. All rights reserved.
- * Copyright (c) 2003-2006, PathScale, Inc. All rights reserved.
+ * Copyright (c) 2010. QLogic Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -31,27 +30,30 @@
  * SOFTWARE.
  */
 
-#ifndef __IPS_SUBPORT_H
-#define __IPS_SUBPORT_H
+#include <sys/types.h>
+#include <stdint.h>
 
-#include "psm_user.h"
-#include "ips_recvhdrq.h"
-#include "ips_writehdrq.h"
-
-/* This data structure is allocated in ureg page of each subport process */
-
-struct ips_subport_ureg {
-    pthread_spinlock_t port_lock;		/* only used in master ureg */
-    struct ips_recvhdrq_state recvq_state;	/* only used in master ureg */
-    struct ips_writehdrq_state writeq_state;	/* used in all ureg pages */
-};
-
-psm_error_t
-ips_subport_ureg_get(ptl_t *ptl, const psmi_port_t *port,
-                     struct ips_subport_ureg **uregp);
-
-psm_error_t
-ips_subport_ureg_initialize(ptl_t *ptl, uint32_t subport,
-                            struct ips_subport_ureg *uregp);
-
+#if defined(PSM_USE_KNEM)
+#include "knem_io.h"
 #endif
+
+/*
+ * Open handle to knem device.
+ */
+int knem_open_device();
+
+/*
+ * read from remote process given a cookie
+ */
+int64_t knem_get(int fd, int64_t cookie, const void *src, int64_t n);
+
+/*
+ * write to remote process pid given a cookie
+ */
+int64_t knem_put(int fd, const void *src, int64_t n, int64_t cookie);
+
+
+/*
+ * register a memory region for put/get
+ */
+int64_t knem_register_region(void *buffer, size_t len, int write);

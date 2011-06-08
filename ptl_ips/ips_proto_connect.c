@@ -294,6 +294,49 @@ ips_ipsaddr_set_req_params(struct ips_proto *proto,
     return;
 }
 
+static psm_error_t __recvpath
+ips_proto_send_ctrl_message_request(struct ips_proto *proto,
+                                    struct ips_flow *flow, uint8_t message_type, 
+                                    uint32_t *msg_queue_mask, void *payload,
+				    uint64_t timeout)
+{
+    psm_error_t err = PSM_OK;
+
+    while (get_cycles() < timeout) {
+        err = ips_proto_send_ctrl_message(flow, message_type,
+                                          msg_queue_mask, payload);
+        if (err == PSM_OK) {
+	    break;
+        }
+        if ((err = psmi_err_only(psmi_poll_internal(proto->ep, 1)))) {
+	    break;
+	}
+    }
+    return err;
+}
+
+static psm_error_t __recvpath
+ips_proto_send_ctrl_message_reply(struct ips_flow *flow, uint8_t message_type, 
+                                  uint32_t *msg_queue_mask, void *payload)
+{
+    /* This will try up to 100 times until the message is sent. The code
+     * is persistent becausing dropping replies will lead to a lack of
+     * overall progress on the connection/disconnection. We do not want
+     * to poll from here, and we cannot afford a lengthy timeout, since 
+     * this is called from the receive path.
+     */
+    psm_error_t err = PSM_OK;
+    int i;
+    for (i = 0; i < 100; i++) {
+        err = ips_proto_send_ctrl_message(flow, message_type,
+                                          msg_queue_mask, payload);
+        if (err == PSM_OK) {
+	    break;
+        }
+    }
+    return err;
+}
+
 int
 ips_proto_build_connect_message(struct ips_proto *proto, 
 			       struct ips_proto_ctrl_message *msg, 
@@ -376,7 +419,7 @@ ips_flow_init(struct ips_flow *flow, ips_path_rec_t *path, ips_epaddr_t *ipsaddr
     
     flow->path = path;
     flow->ipsaddr = ipsaddr;
-    flow->epinfo  = &ipsaddr->proto->epinfo;
+    flow->epinfo  = &proto->epinfo;
     flow->transfer= transfer_type;
     flow->protocol= protocol;
     flow->flowid  = IPS_FLOWID_PACK(protocol, flow_index);
@@ -386,7 +429,8 @@ ips_flow_init(struct ips_flow *flow, ips_path_rec_t *path, ips_epaddr_t *ipsaddr
     flow->flags = 0;
     flow->sl    = flow->path->epr_sl;
     flow->cca_ooo_pkts = 0;			    
-
+    flow->credits = flow->cwin = proto->flow_credits;
+    flow->ack_interval = max((proto->flow_credits >> 2) - 1, 1);
     flow->scb_num_pending = 0;
     flow->scb_num_unacked = 0;
     flow->xmit_egrlong.egr_flowid = flow_index;
@@ -408,6 +452,40 @@ size_t
 epaddr_size()
 {
     return (size_t) (sizeof(struct psm_epaddr) + sizeof(struct ptl_epaddr));
+}
+
+static
+psm_error_t
+ips_init_ep_qp_and_pkt_context(uint16_t hca_type, uint32_t qp, 
+                               uint32_t context, ips_epaddr_t *ipsaddr)
+{
+    psm_error_t err = PSM_OK;
+    switch(hca_type) {
+    case PSMI_HCA_TYPE_QLE73XX:
+        /* Bit 5 of the context is inserted into bit 0 of QP */
+        ipsaddr->epr.epr_qp = (qp & ~0x1) | (context >> 4);
+        ipsaddr->epr.epr_pkt_context = context & 0xf;
+        break;
+    case PSMI_HCA_TYPE_QLE72XX:
+        if (context == 16) {
+	    /* For context 16, the bottom bit of qp is toggled */
+	    ipsaddr->epr.epr_qp = qp ^ 1;
+	    ipsaddr->epr.epr_pkt_context = 15;
+        }
+        else {
+	    ipsaddr->epr.epr_qp = qp;
+	    ipsaddr->epr.epr_pkt_context = context;
+        }
+        break;
+    case PSMI_HCA_TYPE_QLE71XX:
+        ipsaddr->epr.epr_qp = qp;
+        ipsaddr->epr.epr_pkt_context = context;
+        break;
+    default: 
+        err = PSM_PARAM_ERR;
+        break;
+    }
+    return err;
 }
 
 static
@@ -458,36 +536,16 @@ ips_alloc_epaddr(struct ips_proto *proto, psm_epid_t epid,
     ipsaddr->epr.epr_context = context; 
     
     /* Setup remote endpoint <context,sucontext> */
- determine_qp_context_for_connection:
-    switch(hca_type) {
-    case PSMI_HCA_TYPE_QLE73XX:
-      ipsaddr->epr.epr_qp = proto->epinfo.ep_baseqp |
-	(context >> 4);
-      ipsaddr->epr.epr_pkt_context = context & 0xf;
-      break;
-    case PSMI_HCA_TYPE_QLE72XX:
-      if (context == 16) {
-	ipsaddr->epr.epr_qp = proto->epinfo.ep_baseqp ^ 1;
-	ipsaddr->epr.epr_pkt_context = 15;
-      }
-      else {
-	ipsaddr->epr.epr_qp = proto->epinfo.ep_baseqp;
-	ipsaddr->epr.epr_pkt_context = context;
-      }
-      break;
-    case PSMI_HCA_TYPE_QLE71XX:
-      ipsaddr->epr.epr_qp = proto->epinfo.ep_baseqp;
-      ipsaddr->epr.epr_pkt_context = context;
-      break;
-    default: 
-      {
-	uint64_t llid, lcontext, lsubcontext, lsl;
-	
+    err = ips_init_ep_qp_and_pkt_context(hca_type, proto->epinfo.ep_baseqp,
+					 context, ipsaddr);
+    if (err != PSM_OK) {
+	uint64_t llid, lcontext, lsubcontext, lsl;	
 	_IPATH_ERROR("Connect: Warning! unknown HCA type %d. Assuming remote HCA is same as local.\n", hca_type);
 	PSMI_EPID_UNPACK_EXT(proto->ep->epid, llid, lcontext, lsubcontext, hca_type, lsl);
-	goto determine_qp_context_for_connection;
-      }
+        ips_init_ep_qp_and_pkt_context(hca_type, proto->epinfo.ep_baseqp,
+                                       context, ipsaddr);
     }
+
     /* Subcontext */
     ipsaddr->epr.epr_subcontext = subcontext;
 
@@ -755,18 +813,19 @@ ips_proto_process_connect(struct ips_proto *proto, psm_epid_t epid,
 	    int ipsaddr_do_free = 0;
 	    psmi_assert_always(paylen >= IPS_DISCONNECT_REQREP_MINIMUM_SIZE);
 	    _IPATH_VDBG("Got a disconnect from %s\n", psmi_epaddr_get_name(epid));
+	    proto->num_disconnect_requests++;
 	    /* It's possible to get a disconnection request on a ipsaddr that
 	     * we've since removed if the request is a dupe.  Instead of
 	     * silently dropping the packet, we "echo" the request in the
 	     * reply. */
 	    if (ipsaddr == NULL) {
 		uint16_t src_context = IPS_HEADER_SRCCONTEXT_GET(p_hdr);
+		uint32_t qp;
 
 		ipsaddr = &ipsaddr_f;
 		memset(&ipsaddr_f, 0, sizeof(ips_epaddr_t));
 		ipsaddr_f.epr.epr_context = src_context;
-		ipsaddr_f.epr.epr_subcontext = p_hdr->dst_subcontext;
-		ipsaddr_f.epr.epr_pkt_context = src_context & 0xf;
+		ipsaddr_f.epr.epr_subcontext = p_hdr->src_subcontext;
 	
 		/* QLE72XX is special for context 16 */
 		if ((hdr->hca_type == PSMI_HCA_TYPE_QLE72XX) && 
@@ -781,9 +840,15 @@ ips_proto_process_connect(struct ips_proto *proto, psm_epid_t epid,
 					       3000, &ipsaddr_f);
 		if (err != PSM_OK)
 		  goto fail;
+
+		qp =  proto->epinfo.ep_baseqp;
+                err = ips_init_ep_qp_and_pkt_context(hdr->hca_type, qp,
+						     src_context, &ipsaddr_f);
+		if (err != PSM_OK) {
+	            _IPATH_ERROR("Disconnect: Warning! unknown HCA type %d.\n", hdr->hca_type);
+		    goto fail;
+		}
 		
-		ipsaddr_f.epr.epr_qp = __be32_to_cpu(p_hdr->bth[1]);
-		ipsaddr_f.epr.epr_qp &= 0xffffff; /* QP is 24 bits */
 		ipsaddr_f.proto = proto;
 		ipsaddr_f.ptl = (ptl_t *) -1;
 		/* If the send fails because of pio_busy, don't let ips queue
@@ -805,16 +870,16 @@ ips_proto_process_connect(struct ips_proto *proto, psm_epid_t epid,
 		    uint64_t lid, context, subcontext;
 
 		    PSMI_EPID_UNPACK(epid, lid, context, subcontext);
-		    _IPATH_VDBG("Unknown disconnect from epid %d:%d.%d "
+		    _IPATH_VDBG("Unknown disconnect request from epid %d:%d.%d "
 			"bad_uuid=%s\n", (int) lid, 
 			(int) context, (int) subcontext, uuid_valid ? "NO" : "YES");
 		}
 	    }
 
 	    memset(buf, 0, sizeof buf);
-	    ips_proto_send_ctrl_message(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO], 
-					OPCODE_DISCONNECT_REPLY,
-					&ipsaddr->ctrl_msg_queued, buf);
+	    ips_proto_send_ctrl_message_reply(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO], 
+					      OPCODE_DISCONNECT_REPLY,
+					      &ipsaddr->ctrl_msg_queued, buf);
 	    /* We can safely free the ipsaddr if required since disconnect
 	     * messages are never enqueued so no reference to ipsaddr is kept */
 	    if (ipsaddr_do_free)
@@ -825,13 +890,13 @@ ips_proto_process_connect(struct ips_proto *proto, psm_epid_t epid,
 	case OPCODE_DISCONNECT_REPLY:
 	    if (!ipsaddr || !uuid_valid) {
 		uint64_t lid, context, subcontext;
-
 		PSMI_EPID_UNPACK(epid, lid, context, subcontext);
-		_IPATH_VDBG("Unknown disconnect from epid %d:%d.%d bad_uuid=%s\n",
+		_IPATH_VDBG("Unknown disconnect reply from epid %d:%d.%d bad_uuid=%s\n",
 			(int) lid, (int) context, (int) subcontext,
 			uuid_valid ? "NO" : "YES");
 		break;
-	    } else if (ipsaddr->cstate_to == CSTATE_TO_WAITING_DISC) {
+	    }
+            else if (ipsaddr->cstate_to == CSTATE_TO_WAITING_DISC) {
 		ipsaddr->cstate_to = CSTATE_TO_DISCONNECTED;
 		/* Freed in disconnect() if cstate_from == NONE */
 	    } /* else dupe reply */
@@ -987,9 +1052,9 @@ ptl_handle_connect_req(struct ips_proto *proto, psm_epid_t epid,
     proto->num_connected_from++;
 
 do_reply:
-    ips_proto_send_ctrl_message(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO], 
-				OPCODE_CONNECT_REPLY,
-				&ipsaddr->ctrl_msg_queued, buf);
+    ips_proto_send_ctrl_message_reply(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO], 
+				      OPCODE_CONNECT_REPLY,
+				      &ipsaddr->ctrl_msg_queued, buf);
 no_reply:
 fail:
     return err;
@@ -1007,23 +1072,32 @@ ips_proto_connect(struct ips_proto *proto, int numep,
     ips_epaddr_t *ipsaddr = NULL;
     int numep_toconnect = 0, numep_left;
     char buf[IPS_MAX_CONNECT_PAYLEN];
+    union psmi_envvar_val credits_intval;
+    int connect_credits;
+
+    psmi_getenv("PSM_CONNECT_CREDITS",
+                "End-point connect request credits.",
+                PSMI_ENVVAR_LEVEL_HIDDEN, PSMI_ENVVAR_TYPE_UINT,
+                (union psmi_envvar_val) 100,
+                &credits_intval);
+
+    connect_credits = credits_intval.e_uint;
 
     PSMI_PLOCK_ASSERT();
 
-    /* All timeout values are in cycles */
+    /* All timeout values are in cycles */ 
     uint64_t t_start = get_cycles();
-    /* Print a timeout every 30 seconds or at least once if the connect timeout
-     * is less than 30seconds */
+    /* Print a timeout at the warning interval */
     union psmi_envvar_val warn_intval;
     uint64_t to_warning_interval;
     uint64_t to_warning_next;
 
-    /* Setup warning interval - default is 30 seconds */
+    /* Setup warning interval */
     psmi_getenv("PSM_CONNECT_WARN_INTERVAL",
 		"Period in seconds to warn if connections are not completed."
-		"Default is 30 seconds.",
+		"Default is 300 seconds, 0 to disable",
 		PSMI_ENVVAR_LEVEL_USER, PSMI_ENVVAR_TYPE_UINT,
-		(union psmi_envvar_val) 30,
+		(union psmi_envvar_val) 300,
 		&warn_intval);
     
     to_warning_interval = nanosecs_to_cycles(warn_intval.e_uint * SEC_ULL);
@@ -1105,6 +1179,7 @@ ips_proto_connect(struct ips_proto *proto, int numep,
 	array_of_epaddr[i] = epaddr;
 	ipsaddr->s_timeout = get_cycles();
 	ipsaddr->delay_in_ms = 1;
+	ipsaddr->credit = 0;
 	numep_toconnect++;
     }
 
@@ -1138,6 +1213,8 @@ ips_proto_connect(struct ips_proto *proto, int numep,
 		 * error is in ipsaddr->cerror_to */
 		array_of_errors[i] = PSM_OK;
 		numep_left--;
+		connect_credits++;
+		ipsaddr->credit = 0;
 		continue;
 	    }
 	    while (keep_polling) {
@@ -1145,19 +1222,26 @@ ips_proto_connect(struct ips_proto *proto, int numep,
 		    err = PSM_TIMEOUT;
 		    goto err_timeout;
 		}
-		if (get_cycles() >= to_warning_next) {
+		if (to_warning_interval && get_cycles() >= to_warning_next) {
 		    uint64_t waiting_time = 
 			cycles_to_nanosecs(get_cycles() - t_start) / SEC_ULL;
+		    const char *first_name = NULL;
+		    int num_waiting = 0;
 
 		    for (i = 0; i < numep; i++) {
 			if (!array_of_epid_mask[i] || 
 			     array_of_errors[i] != PSM_EPID_UNKNOWN)
 			    continue;
-			_IPATH_INFO("Couldn't connect to %s. "
+			if (!first_name)
+			    first_name = psmi_epaddr_get_name(array_of_epid[i]);
+			num_waiting++;
+		    }
+		    if (first_name) {
+			_IPATH_INFO("Couldn't connect to %s (and %d others). "
 			    "Time elapsed %02i:%02i:%02i. Still trying...\n",
-			    psmi_epaddr_get_name(array_of_epid[i]),
-                            (int) (waiting_time / 3600),
-                            (int) ((waiting_time / 60) - 
+			    first_name, num_waiting,
+			    (int) (waiting_time / 3600),
+                            (int) ((waiting_time / 60) -
 				   ((waiting_time / 3600) * 60)),
                             (int) (waiting_time - ((waiting_time / 60) * 60)));
 		    }
@@ -1168,22 +1252,30 @@ ips_proto_connect(struct ips_proto *proto, int numep,
 		    goto fail;
 
 		if (get_cycles() > ipsaddr->s_timeout) {
-		    _IPATH_VDBG("Connect req to %u:%u:%u\n",
-				__be16_to_cpu(ipsaddr->epr.epr_base_lid), 
-				ipsaddr->epr.epr_context, 
-				ipsaddr->epr.epr_subcontext);
-		    if (!ips_proto_send_ctrl_message(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO],
-						     OPCODE_CONNECT_REQUEST,
-						     &ipsaddr->ctrl_msg_queued,
-						     buf))
-		    {
-			keep_polling = 0;
-			ipsaddr->delay_in_ms = 
-			    min(100, ipsaddr->delay_in_ms << 2);
-			ipsaddr->s_timeout = get_cycles() + 
-			    nanosecs_to_cycles(ipsaddr->delay_in_ms * MSEC_ULL);
+		    if (!ipsaddr->credit && connect_credits) {
+		        ipsaddr->credit = 1;
+			connect_credits--;
 		    }
-		    /* If not, send got "busy", keep trying */
+		    if (ipsaddr->credit) {
+		        _IPATH_VDBG("Connect req to %u:%u:%u\n",
+				    __be16_to_cpu(ipsaddr->epr.epr_base_lid), 
+				    ipsaddr->epr.epr_context, 
+				    ipsaddr->epr.epr_subcontext);
+		        if (ips_proto_send_ctrl_message(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO],
+							OPCODE_CONNECT_REQUEST,
+							&ipsaddr->ctrl_msg_queued,
+							buf) == PSM_OK) {
+			    keep_polling = 0;
+			    ipsaddr->delay_in_ms = 
+			        min(100, ipsaddr->delay_in_ms << 1);
+		            ipsaddr->s_timeout = get_cycles() + 
+			        nanosecs_to_cycles(ipsaddr->delay_in_ms * MSEC_ULL);
+			}
+		        /* If not, send got "busy", keep trying */
+		    }
+		    else {
+		        keep_polling = 0;
+		    }
 		}
 	    }
 	}
@@ -1250,11 +1342,32 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
     uint64_t timeout;
     psm_error_t err = PSM_OK;
     char buf[IPS_MAX_CONNECT_PAYLEN];
-
     uint64_t reqs_sent = 0;
+    union psmi_envvar_val credits_intval;
+    int disconnect_credits;
+    uint64_t t_warning, t_start;
+    union psmi_envvar_val warn_intval;
+    unsigned warning_secs;
 
-    psmi_assert_always(timeout_in > 0);
     psmi_assert_always(numep > 0);
+
+    psmi_getenv("PSM_DISCONNECT_CREDITS",
+                "End-point disconnect request credits.",
+                PSMI_ENVVAR_LEVEL_HIDDEN, PSMI_ENVVAR_TYPE_UINT,
+                (union psmi_envvar_val) 100,
+                &credits_intval);
+
+    disconnect_credits = credits_intval.e_uint;
+
+    /* Setup warning interval */
+    psmi_getenv("PSM_DISCONNECT_WARN_INTERVAL",
+		"Period in seconds to warn if disconnections are not completed."
+		"Default is 300 seconds, 0 to disable.",
+		PSMI_ENVVAR_LEVEL_USER, PSMI_ENVVAR_TYPE_UINT,
+		(union psmi_envvar_val) 300,
+		&warn_intval);
+
+    warning_secs = warn_intval.e_uint;
 
     PSMI_PLOCK_ASSERT();
 
@@ -1264,6 +1377,7 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
 	    continue;
 	psmi_assert_always(array_of_epaddr[i]->ptl == proto->ptl);
 	cstate = array_of_epaddr[i]->ptladdr->cstate_to;
+	array_of_epaddr[i]->ptladdr->credit = 0;
 	if (cstate == CSTATE_NONE) {
 	    array_of_errors[i] = PSM_OK;
 	    continue;
@@ -1284,6 +1398,9 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
     else
 	timeout = get_cycles() + nanosecs_to_cycles(timeout_in);
 
+    t_start = get_cycles();
+    t_warning = t_start + nanosecs_to_cycles(warning_secs * SEC_ULL);
+
     n_first = ((uint32_t) get_cycles()) % numep;
     if (!force) {
 	numep_left = numep_todisc;
@@ -1297,19 +1414,20 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
 		    case CSTATE_TO_DISCONNECTED:
 			array_of_errors[i] = PSM_OK;
 			numep_left--;
+			disconnect_credits++;
+			ipsaddr->credit = 0;
 			continue;
-			break;
 		    case CSTATE_TO_WAITING_DISC:
 			if (ipsaddr->s_timeout > get_cycles())
 			    continue;
 			ipsaddr->delay_in_ms = 
-			    min(100, ipsaddr->delay_in_ms << 2);
+			    min(100, ipsaddr->delay_in_ms << 1);
 			ipsaddr->s_timeout = get_cycles() +
 			    nanosecs_to_cycles(ipsaddr->delay_in_ms*MSEC_ULL);
-			ips_proto_send_ctrl_message(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO],
-						    OPCODE_DISCONNECT_REQUEST,
-						    &ipsaddr->ctrl_msg_queued, 
-						    buf);
+			ips_proto_send_ctrl_message_request(proto, &ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO],
+						            OPCODE_DISCONNECT_REQUEST,
+						            &ipsaddr->ctrl_msg_queued, 
+						            buf, timeout);
 			reqs_sent++;
 			break;
 		    case CSTATE_ESTABLISHED:
@@ -1327,14 +1445,20 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
 			ips_ptladdr_unlock(ipsaddr);
 			if (has_pending)
 			    continue;
+		        if (!ipsaddr->credit && disconnect_credits) {
+		            ipsaddr->credit = 1;
+			    disconnect_credits--;
+		        }
+		        if (!ipsaddr->credit)
+			    continue;
 			ipsaddr->delay_in_ms = 1;
 			ipsaddr->cstate_to = CSTATE_TO_WAITING_DISC;
 			ipsaddr->s_timeout = get_cycles() + 
 			  nanosecs_to_cycles(MSEC_ULL);			
-			ips_proto_send_ctrl_message(&ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO],
-						    OPCODE_DISCONNECT_REQUEST,
-						    &ipsaddr->ctrl_msg_queued, 
-						    buf);
+			ips_proto_send_ctrl_message_request(proto, &ipsaddr->flows[EP_FLOW_GO_BACK_N_PIO],
+						            OPCODE_DISCONNECT_REQUEST,
+						            &ipsaddr->ctrl_msg_queued, 
+						            buf, timeout);
 			reqs_sent++;
 			break;
 		    default:
@@ -1349,6 +1473,15 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
 
 	    if ((err = psmi_err_only(psmi_poll_internal(proto->ep, 1))))
 		goto fail;
+
+	    if (warning_secs && get_cycles() > t_warning) {
+                _IPATH_INFO("graceful close in progress for %d/%d peers "
+		    "(elapsed=%d millisecs,timeout=%d millisecs,reqs=%lld)\n", numep_left, numep_todisc,
+		    (int) (cycles_to_nanosecs(get_cycles() - t_start) / MSEC_ULL),
+                    (int) (timeout_in / MSEC_ULL),
+		    (unsigned long long) reqs_sent);
+                t_warning = get_cycles() + nanosecs_to_cycles(warning_secs * SEC_ULL);
+	    }
 	} 
 	while (timeout > get_cycles());
 
@@ -1359,18 +1492,21 @@ ips_proto_disconnect(struct ips_proto *proto, int force, int numep,
 		    continue;
 		if (array_of_errors[i] == PSM_EPID_UNKNOWN) {
 		    array_of_errors[i] = PSM_TIMEOUT;
-		_IPATH_VDBG("disc timeout on index %d, epaddr %s\n",
-			    i, psmi_epaddr_get_name(array_of_epaddr[i]->epid));
+		    _IPATH_VDBG("disc timeout on index %d, epaddr %s\n",
+			        i, psmi_epaddr_get_name(array_of_epaddr[i]->epid));
 		}
 	    }
             _IPATH_PRDBG("graceful close incomplete for %d/%d peers "
-		    "(timeout=%d millisecs,reqs=%lld)\n", numep_left, numep_todisc,
+		    "(elapsed=%d millisecs,timeout=%d millisecs,reqs=%lld)\n", numep_left, numep_todisc,
+		    (int) (cycles_to_nanosecs(get_cycles() - t_start) / MSEC_ULL),
                     (int) (timeout_in / MSEC_ULL),
 		    (unsigned long long) reqs_sent);
 	} 
 	else
-            _IPATH_PRDBG("graceful close complete from %d peers, reqs_sent=%lld\n",
-			    numep_todisc, (unsigned long long) reqs_sent);
+            _IPATH_PRDBG("graceful close complete from %d peers in %d millisecs, reqs_sent=%lld\n",
+		     numep_todisc,
+		    (int) (cycles_to_nanosecs(get_cycles() - t_start) / MSEC_ULL),
+                    (unsigned long long) reqs_sent);
     } else {
 	for (n = 0; n < numep; n++) {
 	    i = (n_first + n) % numep;
