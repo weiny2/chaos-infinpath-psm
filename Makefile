@@ -1,4 +1,4 @@
-# Copyright (c) 2006-2010. QLogic Corporation. All rights reserved.
+# Copyright (c) 2006-2011. QLogic Corporation. All rights reserved.
 # Copyright (c) 2003-2006, PathScale, Inc. All rights reserved.
 #
 # This software is available to you under a choice of one of two
@@ -29,6 +29,8 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
+
+RPM_NAME := infinipath-psm
 
 SUBDIRS:= ptl_self ptl_ips ptl_am libuuid ipath
 export build_dir := .
@@ -92,6 +94,15 @@ TARGLIB := libpsm_infinipath
 MAJOR := $(PSM_LIB_MAJOR)
 MINOR := $(PSM_LIB_MINOR)
 
+# The desired version number comes from the most recent tag starting with "v"
+VERSION := $(shell if [ -d .git ] ; then git tag -l 2> /dev/null | grep "^v" | sed 's/^v//' | head -1 ; else echo "version" ; fi)
+
+# The desired release number comes from the most recent tag starting with "r"
+RELEASE := $(shell if [ -d .git ] ; then git tag -l 2> /dev/null | grep "^r" | sed 's/^r//' | head -1 ; else echo "release" ; fi)
+
+# Concatenated version and release
+VERSION_RELEASE := $(VERSION)-$(RELEASE)
+
 LDLIBS := -linfinipath -lrt -lpthread -ldl ${EXTRA_LIBS}
 
 all: symlinks
@@ -109,8 +120,8 @@ clean:
 	rm -f *.o ${TARGLIB}.*
 
 distclean: cleanlinks clean
-	rm -f infinipath-psm.spec
-	rm -f infinipath-psm-${MAJOR}.${MINOR}.tar.gz
+	rm -f ${RPM_NAME}.spec
+	rm -f ${RPM_NAME}-${VERSION_RELEASE}.tar.gz
 
 .PHONY: symlinks
 symlinks:
@@ -141,34 +152,43 @@ install: all
 	install -D 60-ipath.rules ${DESTDIR}/etc/udev/rules.d/60-ipath.rules
 
 specfile:
-	sed -e 's/@VERSION@/'${MAJOR}.${MINOR}'/g' infinipath-psm.spec.in > \
-		infinipath-psm.spec
+	sed -e 's/@VERSION@/'${VERSION}'/g' ${RPM_NAME}.spec.in | \
+		sed -e 's/@RELEASE@/'${RELEASE}'/g' > \
+		${RPM_NAME}.spec
 	if [ X$(PSM_USE_SYS_UUID) = X1 ]; then \
 		REQUIRES="Requires: $(shell echo $(SYS_UUID_RPM_NAME) | sed -e 's/-devel//')" ; \
 		REQUIRESDEVEL="Requires: $(SYS_UUID_RPM_NAME)" ; \
 		sed -i -e 's/@REQUIRES@/'"$${REQUIRES}"'/g' \
 			-e 's/@REQUIRES-DEVEL@/'"$$REQUIRESDEVEL"'/g' \
-			-e 's/@PSM_UUID@//g' infinipath-psm.spec ; \
+			-e 's/@PSM_UUID@//g' ${RPM_NAME}.spec ; \
 	else \
 		sed -i -e '/@REQUIRES@/d' \
 			-e '/@REQUIRES-DEVEL@/d' \
-			-e 's/@PSM_UUID@/USE_PSM_UUID=1/g' infinipath-psm.spec ; \
+			-e 's/@PSM_UUID@/USE_PSM_UUID=1/g' ${RPM_NAME}.spec ; \
 	fi
 
+# The tar is done twice with the first one discarded. This is because of
+# file system stat issues causing the first tar to fail with errors due
+# to files updating while tar is running. I don't understand this.
 dist: distclean specfile
-	mkdir -p infinipath-psm-${MAJOR}.${MINOR}
+	mkdir -p ${RPM_NAME}-${VERSION_RELEASE}
 	for x in $$(/usr/bin/find . -name ".git" -prune -o \
 			-name "cscope*" -prune -o \
 			-name "*.spec.in" -prune -o \
-			-name "infinipath-psm-${MAJOR}.${MINOR}" -prune -o \
+			-name "${RPM_NAME}-${VERSION_RELEASE}" -prune -o \
+			-name "*.orig" -prune -o \
+			-name "*~" -prune -o \
+			-name "#*" -prune -o \
+			-name ".gitignore" -prune -o \
 			-print); do \
 		dir=$$(dirname $$x); \
-		mkdir -p infinipath-psm-${MAJOR}.${MINOR}/$$dir; \
-		[ ! -d $$x ] && cp $$x infinipath-psm-${MAJOR}.${MINOR}/$$dir; \
+		mkdir -p ${RPM_NAME}-${VERSION_RELEASE}/$$dir; \
+		[ ! -d $$x ] && cp $$x ${RPM_NAME}-${VERSION_RELEASE}/$$dir; \
 	done
-	git log -n1 --pretty=format:%H > infinipath-psm-${MAJOR}.${MINOR}/COMMIT
-	tar czvf infinipath-psm-${MAJOR}.${MINOR}.tar.gz infinipath-psm-${MAJOR}.${MINOR}
-	rm -rf infinipath-psm-${MAJOR}.${MINOR}
+	if [ -d .git ] ; then git log -n1 --pretty=format:%H > ${RPM_NAME}-${VERSION_RELEASE}/COMMIT ; fi
+	-tar czvf ${RPM_NAME}-${VERSION_RELEASE}.tar.gz ${RPM_NAME}-${VERSION_RELEASE} > /dev/null 2>&1
+	tar czvf ${RPM_NAME}-${VERSION_RELEASE}.tar.gz ${RPM_NAME}-${VERSION_RELEASE}
+	rm -rf ${RPM_NAME}-${VERSION_RELEASE}
 
 ofeddist:
 	USE_PSM_UUID=1 $(MAKE) dist
