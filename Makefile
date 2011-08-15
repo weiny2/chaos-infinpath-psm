@@ -101,7 +101,7 @@ VERSION := $(shell if [ -d .git ] ; then git tag -l 2> /dev/null | grep "^v" | s
 RELEASE := $(shell if [ -d .git ] ; then git tag -l 2> /dev/null | grep "^r" | sed 's/^r//' | head -1 ; else echo "release" ; fi)
 
 # Concatenated version and release
-VERSION_RELEASE := $(VERSION)-$(RELEASE)
+VERSION_RELEASE := $(VERSION)
 
 LDLIBS := -linfinipath -lrt -lpthread -ldl ${EXTRA_LIBS}
 

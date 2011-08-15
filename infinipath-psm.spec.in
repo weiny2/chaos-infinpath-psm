@@ -5,9 +5,9 @@ Release: 1chaos%{?dist}
 License: GPL
 Group: System Environment/Libraries
 URL: http://www.qlogic.com/
-Source0: %{name}-%{version}-%{release}.tar.gz
+Source0: %{name}-%{version}.tar.gz
 Prefix: /usr
-BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+BuildRoot: %{_tmppath}/%{name}-%{version}-root
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 @REQUIRES@
@@ -45,7 +45,7 @@ Development files for the libpsm_infinipath library
 Static versions of the libpsm_infinipath library
 
 %prep
-%setup -q -n infinipath-psm-%{version}-%{release}
+%setup -q -n infinipath-psm-%{version}
 
 %build
 %{__make} @PSM_UUID@
