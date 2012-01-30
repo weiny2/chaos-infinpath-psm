@@ -61,7 +61,7 @@ ifneq (1,${USE_PSM_UUID})
     # on the package which installs the library.
     PSM_HAVE_UUID_H=$(shell if [ -f /usr/include/uuid/uuid.h ]; then echo 1; else echo 0; fi)
     ifeq (1,${PSM_HAVE_UUID_H})
-       SYS_UUID_RPM_NAME=$(shell rpm -qf --qf "%{NAME} = %{VERSION}-%{RELEASE}" /usr/include/uuid/uuid.h)
+       SYS_UUID_RPM_NAME=$(shell rpm -qf --qf "%{NAME}" /usr/include/uuid/uuid.h)
        PSM_USE_SYS_UUID=1
     endif
 endif
