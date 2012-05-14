@@ -11,6 +11,7 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-root
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 @REQUIRES@
+@BUILD-REQUIRES@
 Conflicts: infinipath-libs
 
 %package devel
@@ -20,6 +21,7 @@ Requires: %{name} = %{version}-%{release}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 @REQUIRES-DEVEL@
+@BUILD-REQUIRES@
 Conflicts: infinipath-devel
 
 %package static
@@ -29,6 +31,7 @@ Requires: %{name} = %{version}-%{release}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 @REQUIRES-DEVEL@
+@BUILD-REQUIRES@
 Conflicts: infinipath-static
 
 %description

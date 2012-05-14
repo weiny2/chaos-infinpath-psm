@@ -158,12 +158,16 @@ specfile:
 	if [ X$(PSM_USE_SYS_UUID) = X1 ]; then \
 		REQUIRES="Requires: $(shell echo $(SYS_UUID_RPM_NAME) | sed -e 's/-devel//')" ; \
 		REQUIRESDEVEL="Requires: $(SYS_UUID_RPM_NAME)" ; \
+		BUILDREQUIRES="BuildRequires: $(SYS_UUID_RPM_NAME)" ; \
 		sed -i -e 's/@REQUIRES@/'"$${REQUIRES}"'/g' \
 			-e 's/@REQUIRES-DEVEL@/'"$$REQUIRESDEVEL"'/g' \
+			-e 's/@BUILD-REQUIRES@/'"$${BUILDREQUIRES}"'/g' \
 			-e 's/@PSM_UUID@//g' ${RPM_NAME}.spec ; \
 	else \
 		sed -i -e '/@REQUIRES@/d' \
 			-e '/@REQUIRES-DEVEL@/d' \
+			-e '/@BUILD-REQUIRES@/d' \
+			-e '/@BUILD-REQUIRES-DEVEL@/d' \
 			-e 's/@PSM_UUID@/USE_PSM_UUID=1/g' ${RPM_NAME}.spec ; \
 	fi
 
